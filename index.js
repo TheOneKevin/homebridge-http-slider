@@ -16,6 +16,7 @@ var Service, Characteristic;
 module.exports = function(homebridge) {
     Service = homebridge.hap.Service;
     Characteristic = homebridge.hap.Characteristic;
+    HomebridgeAPI = homebridge;
 
     homebridge.registerAccessory('homebridge-http-slider', 'Slider', SliderAccessory);
 };
@@ -25,6 +26,10 @@ function SliderAccessory(log, config) {
     log('Starting http-slider');
     this.config = config;
     this.name = config.name;
+
+    this.cacheDirectory = HomebridgeAPI.user.persistPath();
+    this.storage = require('node-persist');
+    this.storage.initSync({dir:this.cacheDirectory, forgiveParseErrors: true});
 
     if (typeof(this.config.thermo_range_low) !== 'number') {
         this.config.thermo_range_low = 0;
@@ -47,8 +52,6 @@ SliderAccessory.prototype = {
     getServices: function() {
         var services = [];
 
-        this.section = 0;
-
         var info = new Service.AccessoryInformation();
         info.setCharacteristic(Characteristic.Name, this.name)
             .setCharacteristic(Characteristic.Manufacturer, 'Programmed by Marvin Dostal')
@@ -66,7 +69,7 @@ SliderAccessory.prototype = {
 
             this.sliderService
                 .getCharacteristic(Characteristic.On)
-                .on('get', this.getAlwaysOn)
+                //.on('get', this.getAlwaysOn)
                 .on('set', this.setAlwaysOn.bind(this));
             this.sliderService
                 .getCharacteristic(Characteristic.Brightness)
@@ -91,12 +94,18 @@ SliderAccessory.prototype = {
             this.sliderService
                 .getCharacteristic(Characteristic.TargetTemperature)
                 .setProps({
-                    maxValue: this.config.thermo_range_high, 
+                    maxValue: this.config.thermo_range_high,
                     minValue: this.config.thermo_range_low
                 })
                 .on('get', this.getPercentage.bind(this))
                 .on('set', this.setPercentage.bind(this));
         }
+
+        var cachedOnState = this.storage.getItemSync(this.name) || false;
+        this.sliderService.setCharacteristic(Characteristic.On, cachedOnState);
+        var cachedBrightness = this.storage.getItemSync(this.name + ' Brightness') || 0;
+        this.sliderService.setCharacteristic(Characteristic.Brightness, cachedBrightness);
+        if(cachedBrightness == 0) this.sliderService.setCharacteristic(Characteristic.On, false);
 
         services.push(this.sliderService);
 
@@ -104,16 +113,22 @@ SliderAccessory.prototype = {
     },
 
     getAlwaysOn: function(callback) {
-        callback(null, true);
+        var cached_state = this.storage.getItemSync(this.name) || false;
+        this.log('Getting state ON ' + this.name + ' ' + this.storage + ' ' + cached_state);
+        callback(null, cached_state);
     },
-    
+
     setAlwaysOn: function(state, callback) {
         callback(null);
-        reset(this.sliderService, Characteristic.On);
+        this.log('Storing state ON ' + this.name + ' ' + this.storage + ' ' + state);
+        this.storage.setItemSync(this.name, state);
+        reset(this.sliderService, Characteristic.On, state);
     },
 
     getPercentage: function(callback) {
-        callback(null, this.section);
+        var cached_state = this.storage.getItemSync(this.name + ' Brightness') || 0;
+        this.log('Getting state BRIGHTNESS ' + this.name + ' ' + this.storage + ' ' + cached_state);
+        callback(null, cached_state);
     },
 
     setPercentage: function(state, callback) {
@@ -127,16 +142,17 @@ SliderAccessory.prototype = {
 
         var interval = range / (numberOfStates - 1);
         var section = (interval * newState) + this.range_low;
-        callback(null, section);
 
-        this.section = section;
-        reset(this.sliderService, this.sliderCharacteristic, 500);
+        this.log('Storing state ' + section);
+        this.storage.setItemSync(this.name + ' Brightness', section);
+        callback(null, section);
+        reset(this.sliderService, this.sliderCharacteristic, section, 500);
     }
 };
 
 /**
  * Calculates the slider position in a slider with a specific number of states.
- * @param {float} percentage 
+ * @param {float} percentage
  * @param {int} numberOfStates
  * @return {int} zero indexed state
  */
@@ -153,34 +169,30 @@ var percentageToSlider = function(percentage, numberOfStates) {
     var interval_half = interval / 2;
 
     // avg. running time of n/2. propably O(n logn) possible
-    for (var i=0; i < numberOfStates; i++) 
+    for (var i=0; i < numberOfStates; i++)
         if (((i*interval)+interval_half) > percentage)
             return i;
 
     // it should never get here, but for correctness; why not?
-    return numberOfStates - 1; 
+    return numberOfStates - 1;
 };
 
 /**
- * Resets a characteristic of a service by using a getter callback with a 
+ * Resets a characteristic of a service by using a getter callback with a
  * specific delay
  *
  * @param {Service} service The service
  * @param {Characteristic} characterisitc The characteristic of the service to reset
  * @param {number} delay The delay when the reset takes place
  */
-var reset = function(service, characteristic, delay){
+var reset = function(service, characteristic, newValue, delay){
     if (!delay) {
         // default value without ECMAscript 6 features
         delay = 1000;
     }
 
     setTimeout(function() {
-        service.getCharacteristic(characteristic).emit('get', function(error, newValue) {
-            service
-                .getCharacteristic(characteristic)
-                .updateValue(newValue);
-        });
+        service.getCharacteristic(characteristic).updateValue(newValue);
     }, delay);
 };
 
